@@ -49,16 +49,45 @@ def preprocess_host(
 def preprocess_watermark_bitmap(
     watermark_bgr_or_gray: np.ndarray,
     grid_shape: tuple[int, int],
+    *,
+    sharp_binary: bool = True,
 ) -> np.ndarray:
     """
     Resize watermark to ``grid_shape`` (nrow, ncol) of embedding blocks and
     return a flat binary vector in row-major order, values in {0, 1}.
+
+    Logos are often downscaled by a large factor (e.g. 128² → 16²). With
+    ``sharp_binary=True``, area downscaling is followed by Otsu thresholding so
+    edges stay black/white instead of gray mush at 0.5 cut-off.
     """
     wm = _to_gray_float01(watermark_bgr_or_gray)
     gh, gw = grid_shape
     small = cv2.resize(wm, (gw, gh), interpolation=cv2.INTER_AREA)
-    bits = (small >= 0.5).astype(np.float64).ravel()
+    if sharp_binary:
+        u8 = np.clip(small * 255.0, 0, 255).astype(np.uint8)
+        if float(u8.std()) < 1e-3:
+            bits = (small >= 0.5).astype(np.float64).ravel()
+        else:
+            thr, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            bits = (u8 >= thr).astype(np.float64).ravel()
+    else:
+        bits = (small >= 0.5).astype(np.float64).ravel()
     return bits
+
+
+def watermark_display_preview(
+    watermark_bgr_or_gray: np.ndarray,
+    max_side: int = 160,
+) -> np.ndarray:
+    """Resize watermark for on-screen reference only (does not affect embedding)."""
+    wm = _to_gray_float01(watermark_bgr_or_gray)
+    h, w = wm.shape[:2]
+    m = max(h, w)
+    if m <= max_side:
+        return wm
+    s = max_side / m
+    nh, nw = max(1, int(round(h * s))), max(1, int(round(w * s)))
+    return cv2.resize(wm, (nw, nh), interpolation=cv2.INTER_AREA)
 
 
 def synthetic_shepp_logan(size: int = 512) -> np.ndarray:

@@ -4,3 +4,4 @@ opencv-python>=4.8
 scikit-image>=0.22
 dtcwt>=0.12.0
 six>=1.16
+matplotlib>=3.8
