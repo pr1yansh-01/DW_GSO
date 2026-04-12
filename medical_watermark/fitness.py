@@ -28,6 +28,7 @@ def evaluate_alpha(
     alpha: float,
     henon_key: tuple[float, float, float, float],
     attack_names: list[str] | None = None,
+    nlevels: int = 3,
     w_psnr: float = 0.25,
     w_ssim: float = 0.25,
     w_nc: float = 0.5,
@@ -41,7 +42,7 @@ def evaluate_alpha(
     if attack_names is None:
         attack_names = list(registry.keys())
 
-    wm_img, state = embed(host, watermark_bits, alpha, henon_key)
+    wm_img, state = embed(host, watermark_bits, alpha, henon_key, nlevels=nlevels)
     p = psnr(host, wm_img)
     s = ssim(host, wm_img)
     ext_clean = extract(host, wm_img, state)
@@ -77,6 +78,7 @@ def make_fitness_fn(
     watermark_bits: np.ndarray,
     henon_key: tuple[float, float, float, float],
     attack_names: list[str] | None = None,
+    nlevels: int = 3,
     w_psnr: float = 0.25,
     w_ssim: float = 0.25,
     w_nc: float = 0.5,
@@ -88,6 +90,7 @@ def make_fitness_fn(
             alpha,
             henon_key,
             attack_names=attack_names,
+            nlevels=nlevels,
             w_psnr=w_psnr,
             w_ssim=w_ssim,
             w_nc=w_nc,

@@ -29,6 +29,7 @@ def preprocess_host(
     image_bgr_or_gray: np.ndarray,
     max_side: int = 512,
     nlevels: int = 1,
+    square: bool = True,
 ) -> tuple[np.ndarray, HostMeta]:
     """
     Resize/crop so that after ``nlevels`` DTCWT splits, the finest highpass is
@@ -36,11 +37,17 @@ def preprocess_host(
     multiples of 16.
     """
     x = _to_gray_float01(image_bgr_or_gray)
+    if square:
+        side = max(32, (int(max_side) // 32) * 32)
+        x = cv2.resize(x, (side, side), interpolation=cv2.INTER_AREA)
+        meta = HostMeta(shape=(side, side), nlevels=nlevels)
+        return x, meta
+
     h, w = x.shape[:2]
     scale = min(max_side / max(h, w), 1.0)
     nh, nw = int(round(h * scale)), int(round(w * scale))
-    nh = max(16, (nh // 16) * 16)
-    nw = max(16, (nw // 16) * 16)
+    nh = max(32, (nh // 32) * 32)
+    nw = max(32, (nw // 32) * 32)
     x = cv2.resize(x, (nw, nh), interpolation=cv2.INTER_AREA)
     meta = HostMeta(shape=(nh, nw), nlevels=nlevels)
     return x, meta
@@ -73,6 +80,50 @@ def preprocess_watermark_bitmap(
     else:
         bits = (small >= 0.5).astype(np.float64).ravel()
     return bits
+
+
+def preprocess_watermark_image(
+    watermark_bgr_or_gray: np.ndarray,
+    max_pixels: int,
+    preferred_side: int = 64,
+    max_shape: tuple[int, int] | None = None,
+) -> np.ndarray:
+    """
+    Resize a logo to a binary payload that fits the SVD embedding capacity.
+
+    This preserves the logo as an actual 2D watermark image, but thresholds it so
+    extraction is crisp black/white instead of soft grayscale. The logo aspect ratio
+    is preserved, and output dimensions are multiples of 8 for SVD block embedding.
+    """
+    wm = _to_gray_float01(watermark_bgr_or_gray)
+    h, w = wm.shape[:2]
+    preferred_side = max(8, int(preferred_side))
+    max_h, max_w = max_shape if max_shape is not None else (preferred_side, preferred_side)
+    max_h = max(8, int(max_h))
+    max_w = max(8, int(max_w))
+    scale = preferred_side / max(h, w)
+    scale = min(scale, max_h / h, max_w / w)
+    out_h = max(8, int(round(h * scale)))
+    out_w = max(8, int(round(w * scale)))
+    out_h = max(8, (out_h // 8) * 8)
+    out_w = max(8, (out_w // 8) * 8)
+    if out_h * out_w > max_pixels:
+        scale *= float(np.sqrt(max_pixels / (out_h * out_w)))
+        out_h = max(8, (int(np.floor(out_h * scale)) // 8) * 8)
+        out_w = max(8, (int(np.floor(out_w * scale)) // 8) * 8)
+    while out_h * out_w > max_pixels and (out_h > 8 or out_w > 8):
+        if out_h >= out_w and out_h > 8:
+            out_h -= 8
+        elif out_w > 8:
+            out_w -= 8
+        else:
+            break
+    small = cv2.resize(wm, (out_w, out_h), interpolation=cv2.INTER_AREA)
+    u8 = np.clip(small * 255.0, 0, 255).astype(np.uint8)
+    if float(u8.std()) < 1e-3:
+        return (small >= 0.5).astype(np.float64)
+    thr, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return (u8 >= thr).astype(np.float64)
 
 
 def watermark_display_preview(
