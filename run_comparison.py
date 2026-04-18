@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """
-Run the same watermarking + attack + metric pipeline twice:
-once optimizing embedding strength with PSO, once with GWO.
+Compare the paper-style baseline against a modified watermarking approach.
 
-Examples:
-    python run_comparison.py
-    python run_comparison.py --host mri.png --wm logoo.png
-    python run_comparison.py --host mri.png --wm logoo.png --display
+Baseline:
+    - global alpha
+    - Henon scrambling only
+    - semi-blind extraction (original host required)
+    - PSO alpha search
+
+Modified:
+    - adaptive block-wise alpha
+    - AES encryption followed by Henon scrambling
+    - blind extraction using stored host-side singular values
+    - PSO alpha search
 """
 
 from __future__ import annotations
@@ -22,9 +28,8 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 
+from medical_watermark.crypto import derive_aes_key
 from medical_watermark.fitness import evaluate_alpha, make_fitness_fn
-from medical_watermark.henon import encrypt_bits
-from medical_watermark.optimizers.gwo import gwo_maximize
 from medical_watermark.optimizers.pso import pso_maximize
 from medical_watermark.pipeline import capacity_from_host, embed, extract
 from medical_watermark.preprocess import (
@@ -38,39 +43,62 @@ from medical_watermark.preprocess import (
 def _display_pipeline(
     host: np.ndarray,
     watermark: np.ndarray,
-    encrypted_watermark: np.ndarray,
-    alpha_pso: float,
-    alpha_gwo: float,
+    alpha_baseline: float,
+    alpha_modified: float,
     henon_key: tuple[float, float, float, float],
     nlevels: int,
+    aes_key: bytes,
+    aes_nonce: bytes,
     title_prefix: str = "",
     wm_preview: np.ndarray | None = None,
+    alpha_gain_range: tuple[float, float] = (0.7, 1.3),
 ) -> None:
-    """Show host, original logo, embedded logo, encrypted logo, watermarked, extracted."""
+    """Show baseline and modified watermarking stages side by side."""
     import matplotlib.pyplot as plt
 
-    wm_pso, st_pso = embed(host, watermark, alpha_pso, henon_key, nlevels=nlevels)
-    ex_pso = extract(host, wm_pso, st_pso)
+    wm_baseline, st_baseline = embed(
+        host,
+        watermark,
+        alpha_baseline,
+        henon_key,
+        nlevels=nlevels,
+        adaptive_alpha=False,
+        blind=False,
+        use_aes=False,
+    )
+    ex_baseline = extract(host, wm_baseline, st_baseline)
 
-    wm_gwo, st_gwo = embed(host, watermark, alpha_gwo, henon_key, nlevels=nlevels)
-    ex_gwo = extract(host, wm_gwo, st_gwo)
+    wm_modified, st_modified = embed(
+        host,
+        watermark,
+        alpha_modified,
+        henon_key,
+        nlevels=nlevels,
+        adaptive_alpha=True,
+        alpha_gain_range=alpha_gain_range,
+        use_aes=True,
+        aes_key=aes_key,
+        aes_nonce=aes_nonce,
+        blind=True,
+    )
+    ex_modified = extract(None, wm_modified, st_modified, aes_key=aes_key)
 
     ncols = 6 if wm_preview is not None else 5
     fig, axes = plt.subplots(2, ncols, figsize=(2.6 * ncols, 6))
     gh, gw = watermark.shape
-    fig.suptitle(f"{title_prefix}DTCWT-DCT-SVD binary logo watermark ({gh}x{gw})", fontsize=11)
+    fig.suptitle(f"{title_prefix}Medical watermarking comparison ({gh}x{gw} payload)", fontsize=11)
 
     titles = ["Host"]
     if wm_preview is not None:
         titles.append("Original logo\n(reference)")
-    titles.extend([f"Binary logo\n({gh}x{gw})", "Encrypted\n(Henon)", "Watermarked", "Extracted logo"])
+    titles.extend([f"Binary logo\n({gh}x{gw})", "Protected\nwatermark", "Watermarked", "Extracted logo"])
 
     row_data = [
-        (alpha_pso, wm_pso, ex_pso, "PSO"),
-        (alpha_gwo, wm_gwo, ex_gwo, "GWO"),
+        (alpha_baseline, st_baseline.protected_watermark, wm_baseline, ex_baseline, "Baseline"),
+        (alpha_modified, st_modified.protected_watermark, wm_modified, ex_modified, "Modified"),
     ]
 
-    for row, (alpha, wmarked, extracted, name) in enumerate(row_data):
+    for row, (alpha, protected, wmarked, extracted, name) in enumerate(row_data):
         c = 0
         ax = axes[row, c]
         ax.imshow(host, cmap="gray", vmin=0, vmax=1)
@@ -98,7 +126,7 @@ def _display_pipeline(
         c += 1
 
         ax = axes[row, c]
-        ax.imshow(encrypted_watermark, cmap="gray", vmin=0, vmax=1)
+        ax.imshow(protected, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
         ax.set_xticks([])
         ax.set_yticks([])
         if row == 0:
@@ -139,28 +167,36 @@ def _load_image(path: str | None) -> np.ndarray:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="PSO vs GWO for DTCWT-DCT-SVD logo watermarking")
+    ap = argparse.ArgumentParser(description="Baseline vs modified medical image watermarking")
     ap.add_argument("--host", type=str, default=None, help="Host image path (default: synthetic phantom)")
     ap.add_argument("--wm", type=str, default=None, help="Watermark/logo image path (default: random logo)")
-    ap.add_argument("--max-side", type=int, default=512, help="Preprocessed host max side (larger = more LL3 capacity)")
+    ap.add_argument("--max-side", type=int, default=512, help="Preprocessed host max side")
     ap.add_argument("--wm-side", type=int, default=128, help="Preferred longest side for binary logo payload")
     ap.add_argument("--nlevels", type=int, default=3, help="DTCWT levels; paper uses 3")
     ap.add_argument(
         "--preserve-host-aspect",
         action="store_true",
-        help="Keep host aspect ratio instead of paper-style square MxM resize",
+        help="Keep host aspect ratio instead of paper-style square resize",
     )
     ap.add_argument("--alpha-low", type=float, default=0.01)
     ap.add_argument("--alpha-high", type=float, default=0.35)
-    ap.add_argument("--pso-alpha-low", type=float, default=None, help="Optional PSO-only lower alpha bound")
-    ap.add_argument("--pso-alpha-high", type=float, default=None, help="Optional PSO-only upper alpha bound")
-    ap.add_argument("--gwo-alpha-low", type=float, default=None, help="Optional GWO-only lower alpha bound")
-    ap.add_argument("--gwo-alpha-high", type=float, default=0.12, help="Upper alpha bound for modified GWO")
-    ap.add_argument("--particles", type=int, default=12, help="PSO particles / GWO wolves")
+    ap.add_argument("--baseline-alpha-low", type=float, default=None, help="Optional baseline lower alpha bound")
+    ap.add_argument("--baseline-alpha-high", type=float, default=None, help="Optional baseline upper alpha bound")
+    ap.add_argument("--modified-alpha-low", type=float, default=None, help="Optional modified lower alpha bound")
+    ap.add_argument("--modified-alpha-high", type=float, default=None, help="Optional modified upper alpha bound")
+    ap.add_argument("--particles", type=int, default=12, help="PSO particles")
     ap.add_argument("--iters", type=int, default=12, help="Optimizer iterations")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--alpha-gain-low", type=float, default=0.7, help="Lower adaptive gain for smooth blocks")
+    ap.add_argument("--alpha-gain-high", type=float, default=1.3, help="Upper adaptive gain for textured blocks")
+    ap.add_argument(
+        "--aes-secret",
+        type=str,
+        default="medical-watermark-demo",
+        help="Secret string used to derive the modified-path AES key",
+    )
     ap.add_argument("--out-json", type=str, default=None, help="Write summary JSON")
-    ap.add_argument("--display", action="store_true", help="Show host, logo, encrypted logo, watermarked, extracted")
+    ap.add_argument("--display", action="store_true", help="Show host, watermark, protected payload, watermarked, extracted")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -194,77 +230,104 @@ def main() -> None:
         watermark = rng.random((side, side), dtype=np.float64)
 
     henon_key = (0.1 + 0.01 * args.seed, 0.2, 1.4, 0.3)
-    pso_bounds = (
-        args.alpha_low if args.pso_alpha_low is None else args.pso_alpha_low,
-        args.alpha_high if args.pso_alpha_high is None else args.pso_alpha_high,
+    aes_key = derive_aes_key(args.aes_secret)
+    aes_nonce = bytes(np.random.default_rng(args.seed + 123).integers(0, 256, size=8, dtype=np.uint8).tolist())
+    baseline_bounds = (
+        args.alpha_low if args.baseline_alpha_low is None else args.baseline_alpha_low,
+        args.alpha_high if args.baseline_alpha_high is None else args.baseline_alpha_high,
     )
-    gwo_bounds = (
-        args.alpha_low if args.gwo_alpha_low is None else args.gwo_alpha_low,
-        args.gwo_alpha_high,
+    modified_bounds = (
+        args.alpha_low if args.modified_alpha_low is None else args.modified_alpha_low,
+        args.alpha_high if args.modified_alpha_high is None else args.modified_alpha_high,
     )
+    alpha_gain_range = (args.alpha_gain_low, args.alpha_gain_high)
     attack_names = ["jpeg", "noise", "rotation", "scaling", "translation"]
 
-    fitness_pso = make_fitness_fn(
+    fitness_baseline = make_fitness_fn(
         host,
         watermark,
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
+        adaptive_alpha=False,
+        use_aes=False,
+        blind=False,
     )
-    fitness_gwo = make_fitness_fn(
+    fitness_modified = make_fitness_fn(
         host,
         watermark,
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
-        w_psnr=0.15,
-        w_ssim=0.15,
-        w_nc=0.70,
+        adaptive_alpha=True,
+        alpha_gain_range=alpha_gain_range,
+        use_aes=True,
+        aes_key=aes_key,
+        aes_nonce=aes_nonce,
+        blind=True,
     )
 
     print("Host shape:", host.shape)
     print("DTCWT levels:", meta.nlevels, "| LL3 block grid:", grid_shape, "| binary payload capacity:", cap, "bits")
     print("Logo payload shape:", watermark.shape)
-    print("Optimizing with PSO ...")
-    best_pso, fit_pso, hist_pso = pso_maximize(
-        fitness_pso,
-        pso_bounds,
+    print("Modified approach: adaptive alpha + AES + Henon + blind extraction")
+    print("Adaptive alpha range:", alpha_gain_range)
+
+    print("Optimizing baseline with PSO ...")
+    best_baseline, fit_baseline, hist_baseline = pso_maximize(
+        fitness_baseline,
+        baseline_bounds,
         n_particles=args.particles,
         n_iter=args.iters,
         seed=args.seed,
     )
-    print("Optimizing with GWO ...")
-    best_gwo, fit_gwo, hist_gwo = gwo_maximize(
-        fitness_gwo,
-        gwo_bounds,
-        n_wolves=max(3, args.particles),
+
+    print("Optimizing modified approach with PSO ...")
+    best_modified, fit_modified, hist_modified = pso_maximize(
+        fitness_modified,
+        modified_bounds,
+        n_particles=args.particles,
         n_iter=args.iters,
-        seed=args.seed + 7,
+        seed=args.seed + 17,
     )
 
-    rep_pso = evaluate_alpha(host, watermark, best_pso, henon_key, attack_names=attack_names, nlevels=meta.nlevels)
-    rep_gwo = evaluate_alpha(
+    rep_baseline = evaluate_alpha(
         host,
         watermark,
-        best_gwo,
+        best_baseline,
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
-        w_psnr=0.15,
-        w_ssim=0.15,
-        w_nc=0.70,
+        adaptive_alpha=False,
+        use_aes=False,
+        blind=False,
+    )
+    rep_modified = evaluate_alpha(
+        host,
+        watermark,
+        best_modified,
+        henon_key,
+        attack_names=attack_names,
+        nlevels=meta.nlevels,
+        adaptive_alpha=True,
+        alpha_gain_range=alpha_gain_range,
+        use_aes=True,
+        aes_key=aes_key,
+        aes_nonce=aes_nonce,
+        blind=True,
     )
 
-    def block(title: str, r) -> None:
+    def block(title: str, r, *, adaptive_alpha: bool, use_aes: bool, blind: bool) -> None:
         print(f"\n=== {title} (alpha={r.alpha:.5f}, fitness={r.fitness:.4f}) ===")
+        print(f"  Adaptive alpha: {adaptive_alpha}   AES+Henon: {use_aes}   Blind extraction: {blind}")
         print(f"  PSNR: {r.psnr:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
         print("  NC under attacks:")
         for k, v in r.nc_by_attack.items():
             print(f"    {k:12s} {v:.4f}")
         print(f"  Mean NC (attacks): {r.mean_nc_attacks:.4f}")
 
-    block("PSO", rep_pso)
-    block("GWO", rep_gwo)
+    block("Baseline", rep_baseline, adaptive_alpha=False, use_aes=False, blind=False)
+    block("Modified", rep_modified, adaptive_alpha=True, use_aes=True, blind=True)
 
     summary = {
         "host_shape": list(host.shape),
@@ -272,24 +335,37 @@ def main() -> None:
         "ll3_block_grid": list(grid_shape),
         "payload_capacity_bits": int(cap),
         "watermark_shape": list(watermark.shape),
-        "pso": {
-            "alpha": rep_pso.alpha,
-            "fitness": rep_pso.fitness,
-            "psnr": rep_pso.psnr,
-            "ssim": rep_pso.ssim,
-            "nc_clean": rep_pso.nc_clean,
-            "mean_nc_attacks": rep_pso.mean_nc_attacks,
-            "nc_by_attack": rep_pso.nc_by_attack,
+        "modified_features": {
+            "adaptive_alpha": True,
+            "alpha_gain_range": list(alpha_gain_range),
+            "aes_then_henon": True,
+            "blind_extraction": True,
         },
-        "gwo": {
-            "modified_approach": "GWO with robustness-weighted fitness and bounded alpha search",
-            "alpha": rep_gwo.alpha,
-            "fitness": rep_gwo.fitness,
-            "psnr": rep_gwo.psnr,
-            "ssim": rep_gwo.ssim,
-            "nc_clean": rep_gwo.nc_clean,
-            "mean_nc_attacks": rep_gwo.mean_nc_attacks,
-            "nc_by_attack": rep_gwo.nc_by_attack,
+        "baseline": {
+            "optimizer": "PSO",
+            "adaptive_alpha": False,
+            "aes_then_henon": False,
+            "blind_extraction": False,
+            "alpha": rep_baseline.alpha,
+            "fitness": rep_baseline.fitness,
+            "psnr": rep_baseline.psnr,
+            "ssim": rep_baseline.ssim,
+            "nc_clean": rep_baseline.nc_clean,
+            "mean_nc_attacks": rep_baseline.mean_nc_attacks,
+            "nc_by_attack": rep_baseline.nc_by_attack,
+        },
+        "modified": {
+            "optimizer": "PSO",
+            "adaptive_alpha": True,
+            "aes_then_henon": True,
+            "blind_extraction": True,
+            "alpha": rep_modified.alpha,
+            "fitness": rep_modified.fitness,
+            "psnr": rep_modified.psnr,
+            "ssim": rep_modified.ssim,
+            "nc_clean": rep_modified.nc_clean,
+            "mean_nc_attacks": rep_modified.mean_nc_attacks,
+            "nc_by_attack": rep_modified.nc_by_attack,
         },
     }
     if args.out_json:
@@ -297,17 +373,17 @@ def main() -> None:
         print(f"\nWrote {args.out_json}")
 
     if args.display:
-        enc, _inv = encrypt_bits(watermark.ravel(), henon_key)
-        encrypted_watermark = enc.reshape(watermark.shape)
         _display_pipeline(
             host,
             watermark,
-            encrypted_watermark,
-            best_pso,
-            best_gwo,
+            best_baseline,
+            best_modified,
             henon_key,
             meta.nlevels,
+            aes_key,
+            aes_nonce,
             wm_preview=wm_preview,
+            alpha_gain_range=alpha_gain_range,
         )
 
 

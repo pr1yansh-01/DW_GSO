@@ -32,6 +32,12 @@ def evaluate_alpha(
     w_psnr: float = 0.25,
     w_ssim: float = 0.25,
     w_nc: float = 0.5,
+    adaptive_alpha: bool = False,
+    alpha_gain_range: tuple[float, float] = (0.7, 1.3),
+    use_aes: bool = False,
+    aes_key: bytes | None = None,
+    aes_nonce: bytes | None = None,
+    blind: bool = False,
 ) -> EvaluationResult:
     """
     Embed with ``alpha``, measure PSNR/SSIM vs host, NC vs original bits without
@@ -42,10 +48,22 @@ def evaluate_alpha(
     if attack_names is None:
         attack_names = list(registry.keys())
 
-    wm_img, state = embed(host, watermark_bits, alpha, henon_key, nlevels=nlevels)
+    wm_img, state = embed(
+        host,
+        watermark_bits,
+        alpha,
+        henon_key,
+        nlevels=nlevels,
+        adaptive_alpha=adaptive_alpha,
+        alpha_gain_range=alpha_gain_range,
+        use_aes=use_aes,
+        aes_key=aes_key,
+        aes_nonce=aes_nonce,
+        blind=blind,
+    )
     p = psnr(host, wm_img)
     s = ssim(host, wm_img)
-    ext_clean = extract(host, wm_img, state)
+    ext_clean = extract(None if blind else host, wm_img, state, aes_key=aes_key)
     n0 = nc(watermark_bits, ext_clean)
 
     nc_att: dict[str, float] = {}
@@ -54,7 +72,7 @@ def evaluate_alpha(
         if attacked.shape != host.shape:
             attacked = np.asarray(attacked, dtype=np.float64)
             attacked = attacked[: host.shape[0], : host.shape[1]]
-        ext = extract(host, attacked, state)
+        ext = extract(None if blind else host, attacked, state, aes_key=aes_key)
         nc_att[name] = nc(watermark_bits, ext)
 
     mean_nc = float(np.mean(list(nc_att.values()))) if nc_att else 0.0
@@ -82,6 +100,12 @@ def make_fitness_fn(
     w_psnr: float = 0.25,
     w_ssim: float = 0.25,
     w_nc: float = 0.5,
+    adaptive_alpha: bool = False,
+    alpha_gain_range: tuple[float, float] = (0.7, 1.3),
+    use_aes: bool = False,
+    aes_key: bytes | None = None,
+    aes_nonce: bytes | None = None,
+    blind: bool = False,
 ):
     def f(alpha: float) -> float:
         r = evaluate_alpha(
@@ -94,6 +118,12 @@ def make_fitness_fn(
             w_psnr=w_psnr,
             w_ssim=w_ssim,
             w_nc=w_nc,
+            adaptive_alpha=adaptive_alpha,
+            alpha_gain_range=alpha_gain_range,
+            use_aes=use_aes,
+            aes_key=aes_key,
+            aes_nonce=aes_nonce,
+            blind=blind,
         )
         return r.fitness
 
