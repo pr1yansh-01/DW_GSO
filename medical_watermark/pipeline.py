@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import ndimage
 
 from medical_watermark.crypto import decrypt_bit_payload_aes, encrypt_bit_payload_aes
 from medical_watermark.dtcwt_compat import Pyramid, dtcwt_forward, dtcwt_inverse
@@ -129,6 +130,36 @@ def _henon_decrypt_image(image: np.ndarray, inv_perm: np.ndarray, shape: tuple[i
 def _binarize_extracted_watermark(image: np.ndarray) -> np.ndarray:
     """Baseline-friendly fixed-threshold watermark binarization."""
     return (np.asarray(image, dtype=np.float64) >= 0.5).astype(np.float64)
+
+
+def _remove_small_components(mask: np.ndarray, max_area: int) -> np.ndarray:
+    labels, count = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
+    if count == 0:
+        return mask
+    sizes = np.bincount(labels.ravel())
+    remove = np.zeros(count + 1, dtype=bool)
+    objects = ndimage.find_objects(labels)
+    for label, obj in enumerate(objects, start=1):
+        if obj is None or sizes[label] > max_area:
+            continue
+        height = obj[0].stop - obj[0].start
+        width = obj[1].stop - obj[1].start
+        if height <= 2 and width <= 2:
+            remove[label] = True
+    cleaned = mask.copy()
+    cleaned[remove[labels]] = False
+    return cleaned
+
+
+def _despeckle_binary_watermark(image: np.ndarray) -> np.ndarray:
+    """Remove tiny salt-and-pepper islands from an extracted binary logo."""
+    bits = (np.asarray(image, dtype=np.float64) >= 0.5)
+    max_area = max(2, int(round(bits.size * 0.001)))
+
+    ones = _remove_small_components(bits, max_area=max_area)
+    zeros = _remove_small_components(~ones, max_area=max_area)
+    cleaned = ~zeros
+    return cleaned.astype(np.float64)
 
 
 def _protect_payload(
@@ -369,4 +400,7 @@ def extract(
         block_idx += 1
 
     raw = _recover_payload(enc_out, state, aes_key)
-    return _binarize_extracted_watermark(raw)
+    extracted = _binarize_extracted_watermark(raw)
+    if state.use_aes:
+        return _despeckle_binary_watermark(extracted)
+    return extracted

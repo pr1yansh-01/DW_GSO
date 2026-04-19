@@ -88,15 +88,12 @@ def _display_pipeline(
     wm_modified, st_modified = embed_prepared(prepared_modified, alpha_modified)
     ex_modified = extract(None, wm_modified, st_modified, aes_key=aes_key)
 
-    ncols = 6 if wm_preview is not None else 5
+    ncols = 5
     fig, axes = plt.subplots(2, ncols, figsize=(2.6 * ncols, 6))
     gh, gw = watermark.shape
     fig.suptitle(f"{title_prefix}Medical watermarking comparison ({gh}x{gw} payload)", fontsize=11)
 
-    titles = ["Host"]
-    if wm_preview is not None:
-        titles.append("Original logo\n(reference)")
-    titles.extend([f"Binary logo\n({gh}x{gw})", "Protected\nwatermark", "Watermarked", "Extracted logo"])
+    titles = ["Host", f"Binary logo\n({gh}x{gw})", "Protected\nwatermark", "Watermarked", "Extracted logo"]
 
     row_data = [
         (alpha_baseline, st_baseline, wm_baseline, ex_baseline, "Baseline"),
@@ -112,15 +109,6 @@ def _display_pipeline(
         if row == 0:
             ax.set_title(titles[c], fontsize=9)
         c += 1
-
-        if wm_preview is not None:
-            ax = axes[row, c]
-            ax.imshow(wm_preview, cmap="gray", vmin=0, vmax=1)
-            ax.set_xticks([])
-            ax.set_yticks([])
-            if row == 0:
-                ax.set_title(titles[c], fontsize=9)
-            c += 1
 
         ax = axes[row, c]
         ax.imshow(watermark, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
