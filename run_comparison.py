@@ -6,13 +6,13 @@ Baseline:
     - global alpha
     - Henon scrambling only
     - semi-blind extraction (original host required)
-    - PSO alpha search
+    - scalar alpha search
 
 Modified:
     - adaptive block-wise alpha
     - AES encryption followed by Henon scrambling
     - blind extraction using stored host-side singular values
-    - PSO alpha search
+    - scalar alpha search
 """
 
 from __future__ import annotations
@@ -30,8 +30,9 @@ import numpy as np
 
 from medical_watermark.crypto import derive_aes_key
 from medical_watermark.fitness import evaluate_alpha, make_fitness_fn
+from medical_watermark.optimizers.bounded import bounded_maximize
 from medical_watermark.optimizers.pso import pso_maximize
-from medical_watermark.pipeline import capacity_from_host, embed, extract
+from medical_watermark.pipeline import PreparedEmbedding, capacity_from_host, embed_prepared, extract, prepare_embedding
 from medical_watermark.preprocess import (
     preprocess_host,
     preprocess_watermark_image,
@@ -52,35 +53,39 @@ def _display_pipeline(
     title_prefix: str = "",
     wm_preview: np.ndarray | None = None,
     alpha_gain_range: tuple[float, float] = (0.7, 1.3),
+    prepared_baseline: PreparedEmbedding | None = None,
+    prepared_modified: PreparedEmbedding | None = None,
 ) -> None:
     """Show baseline and modified watermarking stages side by side."""
     import matplotlib.pyplot as plt
 
-    wm_baseline, st_baseline = embed(
-        host,
-        watermark,
-        alpha_baseline,
-        henon_key,
-        nlevels=nlevels,
-        adaptive_alpha=False,
-        blind=False,
-        use_aes=False,
-    )
+    if prepared_baseline is None:
+        prepared_baseline = prepare_embedding(
+            host,
+            watermark,
+            henon_key,
+            nlevels=nlevels,
+            adaptive_alpha=False,
+            blind=False,
+            use_aes=False,
+        )
+    wm_baseline, st_baseline = embed_prepared(prepared_baseline, alpha_baseline)
     ex_baseline = extract(host, wm_baseline, st_baseline)
 
-    wm_modified, st_modified = embed(
-        host,
-        watermark,
-        alpha_modified,
-        henon_key,
-        nlevels=nlevels,
-        adaptive_alpha=True,
-        alpha_gain_range=alpha_gain_range,
-        use_aes=True,
-        aes_key=aes_key,
-        aes_nonce=aes_nonce,
-        blind=True,
-    )
+    if prepared_modified is None:
+        prepared_modified = prepare_embedding(
+            host,
+            watermark,
+            henon_key,
+            nlevels=nlevels,
+            adaptive_alpha=True,
+            alpha_gain_range=alpha_gain_range,
+            use_aes=True,
+            aes_key=aes_key,
+            aes_nonce=aes_nonce,
+            blind=True,
+        )
+    wm_modified, st_modified = embed_prepared(prepared_modified, alpha_modified)
     ex_modified = extract(None, wm_modified, st_modified, aes_key=aes_key)
 
     ncols = 6 if wm_preview is not None else 5
@@ -94,11 +99,11 @@ def _display_pipeline(
     titles.extend([f"Binary logo\n({gh}x{gw})", "Protected\nwatermark", "Watermarked", "Extracted logo"])
 
     row_data = [
-        (alpha_baseline, st_baseline.protected_watermark, wm_baseline, ex_baseline, "Baseline"),
-        (alpha_modified, st_modified.protected_watermark, wm_modified, ex_modified, "Modified"),
+        (alpha_baseline, st_baseline, wm_baseline, ex_baseline, "Baseline"),
+        (alpha_modified, st_modified, wm_modified, ex_modified, "Modified"),
     ]
 
-    for row, (alpha, protected, wmarked, extracted, name) in enumerate(row_data):
+    for row, (alpha, state, wmarked, extracted, name) in enumerate(row_data):
         c = 0
         ax = axes[row, c]
         ax.imshow(host, cmap="gray", vmin=0, vmax=1)
@@ -126,7 +131,7 @@ def _display_pipeline(
         c += 1
 
         ax = axes[row, c]
-        ax.imshow(protected, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
+        ax.imshow(state.protected_watermark, cmap="gray", vmin=0, vmax=1, interpolation="nearest")
         ax.set_xticks([])
         ax.set_yticks([])
         if row == 0:
@@ -148,7 +153,12 @@ def _display_pipeline(
         if row == 0:
             ax.set_title(titles[c], fontsize=9)
 
-        axes[row, 0].set_ylabel(f"{name}\nalpha={alpha:.4f}", fontsize=9)
+        if state.adaptive_alpha:
+            used = state.alpha_blocks[: state.grid_shape[0], : state.grid_shape[1]]
+            alpha_text = f"base alpha={alpha:.4f}\nblock alpha={used.min():.4f}-{used.max():.4f}"
+        else:
+            alpha_text = f"alpha={alpha:.4f}"
+        axes[row, 0].set_ylabel(f"{name}\n{alpha_text}", fontsize=9)
 
     plt.tight_layout()
     plt.show()
@@ -186,6 +196,12 @@ def main() -> None:
     ap.add_argument("--modified-alpha-high", type=float, default=None, help="Optional modified upper alpha bound")
     ap.add_argument("--particles", type=int, default=12, help="PSO particles")
     ap.add_argument("--iters", type=int, default=12, help="Optimizer iterations")
+    ap.add_argument(
+        "--optimizer",
+        choices=("..", "pso"),
+        default="..",
+        help="Alpha optimizer. '..' is much faster for this 1-D search; use 'pso' for the original PSO run.",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--alpha-gain-low", type=float, default=0.7, help="Lower adaptive gain for smooth blocks")
     ap.add_argument("--alpha-gain-high", type=float, default=1.3, help="Upper adaptive gain for textured blocks")
@@ -242,6 +258,27 @@ def main() -> None:
     )
     alpha_gain_range = (args.alpha_gain_low, args.alpha_gain_high)
     attack_names = ["jpeg", "noise", "rotation", "scaling", "translation"]
+    prepared_baseline = prepare_embedding(
+        host,
+        watermark,
+        henon_key,
+        nlevels=meta.nlevels,
+        adaptive_alpha=False,
+        use_aes=False,
+        blind=False,
+    )
+    prepared_modified = prepare_embedding(
+        host,
+        watermark,
+        henon_key,
+        nlevels=meta.nlevels,
+        adaptive_alpha=True,
+        alpha_gain_range=alpha_gain_range,
+        use_aes=True,
+        aes_key=aes_key,
+        aes_nonce=aes_nonce,
+        blind=True,
+    )
 
     fitness_baseline = make_fitness_fn(
         host,
@@ -252,6 +289,7 @@ def main() -> None:
         adaptive_alpha=False,
         use_aes=False,
         blind=False,
+        prepared=prepared_baseline,
     )
     fitness_modified = make_fitness_fn(
         host,
@@ -265,6 +303,7 @@ def main() -> None:
         aes_key=aes_key,
         aes_nonce=aes_nonce,
         blind=True,
+        prepared=prepared_modified,
     )
 
     print("Host shape:", host.shape)
@@ -272,23 +311,36 @@ def main() -> None:
     print("Logo payload shape:", watermark.shape)
     print("Modified approach: adaptive alpha + AES + Henon + blind extraction")
     print("Adaptive alpha range:", alpha_gain_range)
+    print("Alpha optimizer:", "PSO")
 
-    print("Optimizing baseline with PSO ...")
-    best_baseline, fit_baseline, hist_baseline = pso_maximize(
+    def optimize(title: str, fitness, bounds: tuple[float, float], seed: int):
+        # print(f"Optimizing {title} with {args.optimizer.upper()} ...")
+        print(f"Optimizing {title}")
+        if args.optimizer == "pso":
+            return pso_maximize(
+                fitness,
+                bounds,
+                n_particles=args.particles,
+                n_iter=args.iters,
+                seed=seed,
+            )
+        return bounded_maximize(
+            fitness,
+            bounds,
+            max_iter=max(args.iters, 8),
+        )
+
+    best_baseline, fit_baseline, hist_baseline = optimize(
+        "baseline",
         fitness_baseline,
         baseline_bounds,
-        n_particles=args.particles,
-        n_iter=args.iters,
-        seed=args.seed,
+        args.seed,
     )
-
-    print("Optimizing modified approach with PSO ...")
-    best_modified, fit_modified, hist_modified = pso_maximize(
+    best_modified, fit_modified, hist_modified = optimize(
+        "modified approach",
         fitness_modified,
         modified_bounds,
-        n_particles=args.particles,
-        n_iter=args.iters,
-        seed=args.seed + 17,
+        args.seed + 17,
     )
 
     rep_baseline = evaluate_alpha(
@@ -301,6 +353,7 @@ def main() -> None:
         adaptive_alpha=False,
         use_aes=False,
         blind=False,
+        prepared=prepared_baseline,
     )
     rep_modified = evaluate_alpha(
         host,
@@ -315,11 +368,15 @@ def main() -> None:
         aes_key=aes_key,
         aes_nonce=aes_nonce,
         blind=True,
+        prepared=prepared_modified,
     )
 
     def block(title: str, r, *, adaptive_alpha: bool, use_aes: bool, blind: bool) -> None:
         print(f"\n=== {title} (alpha={r.alpha:.5f}, fitness={r.fitness:.4f}) ===")
         print(f"  Adaptive alpha: {adaptive_alpha}   AES+Henon: {use_aes}   Blind extraction: {blind}")
+        if adaptive_alpha:
+            lo, hi = alpha_gain_range
+            print(f"  Displayed alpha is the optimized base alpha; block gains use range {lo:.2f}-{hi:.2f}")
         print(f"  PSNR: {r.psnr:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
         print("  NC under attacks:")
         for k, v in r.nc_by_attack.items():
@@ -342,7 +399,7 @@ def main() -> None:
             "blind_extraction": True,
         },
         "baseline": {
-            "optimizer": "PSO",
+            "optimizer": args.optimizer,
             "adaptive_alpha": False,
             "aes_then_henon": False,
             "blind_extraction": False,
@@ -355,7 +412,7 @@ def main() -> None:
             "nc_by_attack": rep_baseline.nc_by_attack,
         },
         "modified": {
-            "optimizer": "PSO",
+            "optimizer": args.optimizer,
             "adaptive_alpha": True,
             "aes_then_henon": True,
             "blind_extraction": True,
@@ -384,6 +441,8 @@ def main() -> None:
             aes_nonce,
             wm_preview=wm_preview,
             alpha_gain_range=alpha_gain_range,
+            prepared_baseline=prepared_baseline,
+            prepared_modified=prepared_modified,
         )
 
 

@@ -8,7 +8,7 @@ import numpy as np
 
 from medical_watermark.attacks import make_attack_registry
 from medical_watermark.metrics import nc, psnr, ssim
-from medical_watermark.pipeline import embed, extract
+from medical_watermark.pipeline import PreparedEmbedding, embed, embed_prepared, extract, prepare_embedding
 
 
 @dataclass
@@ -38,6 +38,7 @@ def evaluate_alpha(
     aes_key: bytes | None = None,
     aes_nonce: bytes | None = None,
     blind: bool = False,
+    prepared: PreparedEmbedding | None = None,
 ) -> EvaluationResult:
     """
     Embed with ``alpha``, measure PSNR/SSIM vs host, NC vs original bits without
@@ -48,19 +49,22 @@ def evaluate_alpha(
     if attack_names is None:
         attack_names = list(registry.keys())
 
-    wm_img, state = embed(
-        host,
-        watermark_bits,
-        alpha,
-        henon_key,
-        nlevels=nlevels,
-        adaptive_alpha=adaptive_alpha,
-        alpha_gain_range=alpha_gain_range,
-        use_aes=use_aes,
-        aes_key=aes_key,
-        aes_nonce=aes_nonce,
-        blind=blind,
-    )
+    if prepared is None:
+        wm_img, state = embed(
+            host,
+            watermark_bits,
+            alpha,
+            henon_key,
+            nlevels=nlevels,
+            adaptive_alpha=adaptive_alpha,
+            alpha_gain_range=alpha_gain_range,
+            use_aes=use_aes,
+            aes_key=aes_key,
+            aes_nonce=aes_nonce,
+            blind=blind,
+        )
+    else:
+        wm_img, state = embed_prepared(prepared, alpha)
     p = psnr(host, wm_img)
     s = ssim(host, wm_img)
     ext_clean = extract(None if blind else host, wm_img, state, aes_key=aes_key)
@@ -106,7 +110,22 @@ def make_fitness_fn(
     aes_key: bytes | None = None,
     aes_nonce: bytes | None = None,
     blind: bool = False,
+    prepared: PreparedEmbedding | None = None,
 ):
+    if prepared is None:
+        prepared = prepare_embedding(
+            host,
+            watermark_bits,
+            henon_key,
+            nlevels=nlevels,
+            adaptive_alpha=adaptive_alpha,
+            alpha_gain_range=alpha_gain_range,
+            use_aes=use_aes,
+            aes_key=aes_key,
+            aes_nonce=aes_nonce,
+            blind=blind,
+        )
+
     def f(alpha: float) -> float:
         r = evaluate_alpha(
             host,
@@ -124,6 +143,7 @@ def make_fitness_fn(
             aes_key=aes_key,
             aes_nonce=aes_nonce,
             blind=blind,
+            prepared=prepared,
         )
         return r.fitness
 
