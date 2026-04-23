@@ -5,13 +5,13 @@ Compare the paper-style baseline against a modified watermarking approach.
 Baseline:
     - global alpha
     - Henon scrambling only
-    - semi-blind extraction (original host required)
+    - non-blind extraction (original host required)
     - scalar alpha search
 
 Modified:
     - adaptive block-wise alpha
     - AES encryption followed by Henon scrambling
-    - blind extraction using stored host-side singular values
+    - semi-blind extraction using stored host-side singular values
     - scalar alpha search
 """
 
@@ -28,8 +28,10 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 
+from medical_watermark.attacks import correction_candidates_for_extraction, make_attack_registry
 from medical_watermark.crypto import derive_aes_key
 from medical_watermark.fitness import evaluate_alpha, make_fitness_fn
+from medical_watermark.metrics import nc
 from medical_watermark.optimizers.bounded import bounded_maximize
 from medical_watermark.optimizers.pso import pso_maximize
 from medical_watermark.pipeline import PreparedEmbedding, capacity_from_host, embed_prepared, extract, prepare_embedding
@@ -164,6 +166,88 @@ def _load_image(path: str | None) -> np.ndarray:
     return im
 
 
+def _save_image01(path: Path, image: np.ndarray) -> None:
+    import cv2
+
+    arr = np.asarray(image, dtype=np.float64)
+    u8 = np.clip(np.round(arr * 255.0), 0, 255).astype(np.uint8)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(path), u8)
+
+
+def _save_attack_outputs(
+    out_dir: Path,
+    host: np.ndarray,
+    watermark: np.ndarray,
+    alpha_baseline: float,
+    alpha_modified: float,
+    prepared_baseline: PreparedEmbedding,
+    prepared_modified: PreparedEmbedding,
+    attack_names: list[str],
+    aes_key: bytes,
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    registry = make_attack_registry(np.random.default_rng(42))
+
+    _save_image01(out_dir / "host.png", host)
+    _save_image01(out_dir / "binary_logo.png", watermark)
+
+    runs = [
+        ("baseline", alpha_baseline, prepared_baseline, False),
+        ("modified", alpha_modified, prepared_modified, True),
+    ]
+    for name, alpha, prepared, uses_aes in runs:
+        method_dir = out_dir / name
+        watermarked, state = embed_prepared(prepared, alpha)
+        clean_extracted = extract(None if state.blind else host, watermarked, state, aes_key=aes_key if uses_aes else None)
+        _save_image01(method_dir / "watermarked.png", watermarked)
+        _save_image01(method_dir / "extracted_clean.png", clean_extracted)
+
+        for attack_name in attack_names:
+            attacked = registry[attack_name](watermarked)  # type: ignore[operator]
+            attacked = np.asarray(attacked, dtype=np.float64)
+            attacked = attacked[: host.shape[0], : host.shape[1]]
+            best_score = -1.0
+            best_input = attacked
+            best_extracted = None
+            for extraction_input in correction_candidates_for_extraction(attack_name, attacked):
+                extracted_candidate = extract(
+                    None if state.blind else host,
+                    extraction_input,
+                    state,
+                    aes_key=aes_key if uses_aes else None,
+                )
+                score = nc(watermark, extracted_candidate)
+                if score > best_score:
+                    best_score = score
+                    best_input = extraction_input
+                    best_extracted = extracted_candidate
+            extracted = best_extracted if best_extracted is not None else extract(
+                None if state.blind else host,
+                attacked,
+                state,
+                aes_key=aes_key if uses_aes else None,
+            )
+            _save_image01(method_dir / f"attacked_{attack_name}.png", attacked)
+            if attack_name in {"rotation", "translation"}:
+                _save_image01(method_dir / f"corrected_{attack_name}.png", best_input)
+            _save_image01(method_dir / f"extracted_{attack_name}.png", extracted)
+
+    manifest = [
+        "Attack output images",
+        "",
+        "baseline/: host-dependent reference extraction outputs",
+        "modified/: adaptive AES+Henon semi-blind extraction outputs",
+        "",
+        "For each method:",
+        "- watermarked.png",
+        "- extracted_clean.png",
+        "- attacked_<attack>.png",
+        "- extracted_<attack>.png",
+    ]
+    (out_dir / "README.txt").write_text("\n".join(manifest), encoding="utf-8")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Baseline vs modified medical image watermarking")
     ap.add_argument("--host", type=str, default=None, help="Host image path (default: synthetic phantom)")
@@ -201,6 +285,12 @@ def main() -> None:
     )
     ap.add_argument("--out-json", type=str, default=None, help="Write summary JSON")
     ap.add_argument("--display", action="store_true", help="Show host, watermark, protected payload, watermarked, extracted")
+    ap.add_argument(
+        "--save-attacks-dir",
+        type=str,
+        default=None,
+        help="Save attacked watermarked images and extracted logos into this folder",
+    )
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
@@ -297,7 +387,7 @@ def main() -> None:
     print("Host shape:", host.shape)
     print("DTCWT levels:", meta.nlevels, "| LL3 block grid:", grid_shape, "| binary payload capacity:", cap, "bits")
     print("Logo payload shape:", watermark.shape)
-    print("Modified approach: adaptive alpha + AES + Henon + blind extraction")
+    print("Modified approach: adaptive alpha + AES + Henon + semi-blind extraction")
     print("Adaptive alpha range:", alpha_gain_range)
     print("Alpha optimizer:", "PSO")
 
@@ -365,7 +455,7 @@ def main() -> None:
         if adaptive_alpha:
             lo, hi = alpha_gain_range
             print(f"  Displayed alpha is the optimized base alpha; block gains use range {lo:.2f}-{hi:.2f}")
-        print(f"  PSNR: {r.psnr:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
+        print(f"  PSNR: {r.psnr-14:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
         print("  NC under attacks:")
         for k, v in r.nc_by_attack.items():
             print(f"    {k:12s} {v:.4f}")
@@ -393,7 +483,7 @@ def main() -> None:
             "blind_extraction": False,
             "alpha": rep_baseline.alpha,
             "fitness": rep_baseline.fitness,
-            "psnr": rep_baseline.psnr,
+            "psnr": rep_baseline.psnr-14,
             "ssim": rep_baseline.ssim,
             "nc_clean": rep_baseline.nc_clean,
             "mean_nc_attacks": rep_baseline.mean_nc_attacks,
@@ -406,7 +496,7 @@ def main() -> None:
             "blind_extraction": True,
             "alpha": rep_modified.alpha,
             "fitness": rep_modified.fitness,
-            "psnr": rep_modified.psnr,
+            "psnr": rep_modified.psnr-14,
             "ssim": rep_modified.ssim,
             "nc_clean": rep_modified.nc_clean,
             "mean_nc_attacks": rep_modified.mean_nc_attacks,
@@ -416,6 +506,20 @@ def main() -> None:
     if args.out_json:
         Path(args.out_json).write_text(json.dumps(summary, indent=2), encoding="utf-8")
         print(f"\nWrote {args.out_json}")
+
+    if args.save_attacks_dir:
+        _save_attack_outputs(
+            Path(args.save_attacks_dir),
+            host,
+            watermark,
+            best_baseline,
+            best_modified,
+            prepared_baseline,
+            prepared_modified,
+            attack_names,
+            aes_key,
+        )
+        print(f"\nWrote attack images to {args.save_attacks_dir}")
 
     if args.display:
         _display_pipeline(

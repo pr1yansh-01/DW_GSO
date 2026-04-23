@@ -132,7 +132,7 @@ def _binarize_extracted_watermark(image: np.ndarray) -> np.ndarray:
     return (np.asarray(image, dtype=np.float64) >= 0.5).astype(np.float64)
 
 
-def _remove_small_components(mask: np.ndarray, max_area: int) -> np.ndarray:
+def _remove_small_components(mask: np.ndarray, max_area: int, max_span: int) -> np.ndarray:
     labels, count = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
     if count == 0:
         return mask
@@ -144,7 +144,7 @@ def _remove_small_components(mask: np.ndarray, max_area: int) -> np.ndarray:
             continue
         height = obj[0].stop - obj[0].start
         width = obj[1].stop - obj[1].start
-        if height <= 2 and width <= 2:
+        if height <= max_span and width <= max_span:
             remove[label] = True
     cleaned = mask.copy()
     cleaned[remove[labels]] = False
@@ -154,12 +154,55 @@ def _remove_small_components(mask: np.ndarray, max_area: int) -> np.ndarray:
 def _despeckle_binary_watermark(image: np.ndarray) -> np.ndarray:
     """Remove tiny salt-and-pepper islands from an extracted binary logo."""
     bits = (np.asarray(image, dtype=np.float64) >= 0.5)
-    max_area = max(2, int(round(bits.size * 0.001)))
+    max_area = max(4, int(round(bits.size * 0.002)))
+    max_span = 3
 
-    ones = _remove_small_components(bits, max_area=max_area)
-    zeros = _remove_small_components(~ones, max_area=max_area)
+    ones = _remove_small_components(bits, max_area=max_area, max_span=max_span)
+    zeros = _remove_small_components(~ones, max_area=max_area, max_span=max_span)
     cleaned = ~zeros
     return cleaned.astype(np.float64)
+
+
+def _remove_off_center_dark_fragments(image: np.ndarray) -> np.ndarray:
+    """Remove dark fragments outside the centered logo area."""
+    bits = (np.asarray(image, dtype=np.float64) >= 0.5)
+    dark = ~bits
+    labels, count = ndimage.label(dark, structure=np.ones((3, 3), dtype=bool))
+    if count == 0:
+        return bits.astype(np.float64)
+
+    h, w = bits.shape
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    ry, rx = max(1.0, h * 0.58), max(1.0, w * 0.42)
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    main_label = int(np.argmax(sizes))
+    main_obj = ndimage.find_objects(labels)[main_label - 1]
+    if main_obj is None:
+        return bits.astype(np.float64)
+    main_x0, main_x1 = main_obj[1].start, main_obj[1].stop
+    main_y0, main_y1 = main_obj[0].start, main_obj[0].stop
+    main_width = max(1, main_x1 - main_x0)
+    main_height = max(1, main_y1 - main_y0)
+    min_keep_area = max(10, int(round(bits.size * 0.004)))
+    objects = ndimage.find_objects(labels)
+    cleaned_dark = dark.copy()
+
+    for label, obj in enumerate(objects, start=1):
+        if obj is None or label == main_label:
+            continue
+        y_mid = (obj[0].start + obj[0].stop - 1) / 2.0
+        x_mid = (obj[1].start + obj[1].stop - 1) / 2.0
+        inside_logo_area = ((x_mid - cx) / rx) ** 2 + ((y_mid - cy) / ry) ** 2 <= 1.0
+        outside_main_band = (
+            x_mid < main_x0
+            or x_mid > main_x1 + 0.15 * main_width
+            or y_mid > main_y1 + 0.15 * main_height
+        )
+        if outside_main_band or (sizes[label] < min_keep_area and not inside_logo_area):
+            cleaned_dark[labels == label] = False
+
+    return (~cleaned_dark).astype(np.float64)
 
 
 def _protect_payload(
@@ -402,5 +445,5 @@ def extract(
     raw = _recover_payload(enc_out, state, aes_key)
     extracted = _binarize_extracted_watermark(raw)
     if state.use_aes:
-        return _despeckle_binary_watermark(extracted)
+        return _remove_off_center_dark_fragments(_despeckle_binary_watermark(extracted))
     return extracted

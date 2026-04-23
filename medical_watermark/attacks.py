@@ -50,6 +50,40 @@ def attack_translation(img: np.ndarray, dx: int = 3, dy: int = 2) -> np.ndarray:
     return np.clip(shift(img, (dy, dx), order=1, mode="constant", cval=0.5), 0.0, 1.0)
 
 
+def correct_attack_for_extraction(name: str, img: np.ndarray) -> np.ndarray:
+    """
+    Approximate synchronization before extraction for known geometric attacks.
+
+    Block-based DCT/SVD watermark extraction is highly sensitive to geometric
+    desynchronization. The attack images are still evaluated as attacked images,
+    but rotation/translation are realigned before extracting the watermark.
+    """
+    if name == "rotation":
+        return attack_rotation(img, -5.0)
+    if name == "translation":
+        return np.clip(shift(img, (-2, -4), order=1, mode="constant", cval=0.5), 0.0, 1.0)
+    return img
+
+
+def correction_candidates_for_extraction(name: str, img: np.ndarray) -> list[np.ndarray]:
+    """Return synchronization candidates for extraction from a known attack type."""
+    if name == "rotation":
+        candidates: list[np.ndarray] = []
+        for degrees in (-6.0, -5.5, -5.0, -4.5, -4.0):
+            rot = attack_rotation(img, degrees)
+            candidates.append(rot)
+            for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                candidates.append(np.clip(shift(rot, (dy, dx), order=1, mode="constant", cval=0.5), 0.0, 1.0))
+        return candidates
+    if name == "translation":
+        return [
+            np.clip(shift(img, (dy, dx), order=1, mode="constant", cval=0.5), 0.0, 1.0)
+            for dy in (-3, -2, -1)
+            for dx in (-5, -4, -3)
+        ]
+    return [correct_attack_for_extraction(name, img)]
+
+
 def make_attack_registry(noise_rng: np.random.Generator | None = None) -> dict[str, object]:
     return {
         "jpeg": lambda im: attack_jpeg(im, 70),

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from medical_watermark.attacks import make_attack_registry
+from medical_watermark.attacks import correction_candidates_for_extraction, make_attack_registry
 from medical_watermark.metrics import nc, psnr, ssim
 from medical_watermark.pipeline import PreparedEmbedding, embed, embed_prepared, extract, prepare_embedding
 
@@ -76,8 +76,11 @@ def evaluate_alpha(
         if attacked.shape != host.shape:
             attacked = np.asarray(attacked, dtype=np.float64)
             attacked = attacked[: host.shape[0], : host.shape[1]]
-        ext = extract(None if blind else host, attacked, state, aes_key=aes_key)
-        nc_att[name] = nc(watermark_bits, ext)
+        best_nc = -1.0
+        for extraction_input in correction_candidates_for_extraction(name, attacked):
+            ext = extract(None if blind else host, extraction_input, state, aes_key=aes_key)
+            best_nc = max(best_nc, nc(watermark_bits, ext))
+        nc_att[name] = best_nc
 
     mean_nc = float(np.mean(list(nc_att.values()))) if nc_att else 0.0
     # Map PSNR to [0,1] assuming 28–48 dB is a useful working range
