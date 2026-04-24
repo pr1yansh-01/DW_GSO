@@ -30,8 +30,7 @@ from medical_watermark.attacks import correction_candidates_for_extraction, make
 from medical_watermark.crypto import derive_aes_key
 from medical_watermark.fitness import evaluate_alpha, make_fitness_fn
 from medical_watermark.metrics import nc
-from medical_watermark.optimizers.bounded import bounded_maximize
-from medical_watermark.optimizers.pso import pso_maximize
+from medical_watermark.optimizers.run import gwo_maximize
 from medical_watermark.pipeline import PreparedEmbedding, capacity_from_host, embed_prepared, extract, prepare_embedding
 from medical_watermark.preprocess import (
     preprocess_host,
@@ -271,14 +270,8 @@ def main() -> None:
     ap.add_argument("--baseline-alpha-high", type=float, default=None, help="Optional baseline upper alpha bound")
     ap.add_argument("--modified-alpha-low", type=float, default=None, help="Optional modified lower alpha bound")
     ap.add_argument("--modified-alpha-high", type=float, default=None, help="Optional modified upper alpha bound")
-    ap.add_argument("--particles", type=int, default=12, help="PSO particles")
+    ap.add_argument("--wolves", type=int, default=12, help="GWO wolves")
     ap.add_argument("--iters", type=int, default=12, help="Optimizer iterations")
-    ap.add_argument(
-        "--optimizer",
-        choices=("..", "pso"),
-        default="..",
-        help="Alpha optimizer. '..' is much faster for this 1-D search; use 'pso' for the original PSO run.",
-    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument(
         "--aes-secret",
@@ -388,24 +381,17 @@ def main() -> None:
     print("DTCWT levels:", meta.nlevels, "| LL3 block grid:", grid_shape, "| binary payload capacity:", cap, "bits")
     print("Logo payload shape:", watermark.shape)
     print("Modified approach: adaptive alpha + AES + Henon + semi-blind extraction")
-    print("Adaptive alpha: per-block variance matrix normalized by mean block variance")
-    print("Alpha optimizer:", args.optimizer.upper())
+    print("Adaptive alpha formula: alpha_block = optimized_alpha * variance(coarse LL3 region) / mean_variance(all coarse regions)")
+    print("Alpha optimizer: GWO")
 
     def optimize(title: str, fitness, bounds: tuple[float, float], seed: int):
-        # print(f"Optimizing {title} with {args.optimizer.upper()} ...")
         print(f"Optimizing {title}")
-        if args.optimizer == "pso":
-            return pso_maximize(
-                fitness,
-                bounds,
-                n_particles=args.particles,
-                n_iter=args.iters,
-                seed=seed,
-            )
-        return bounded_maximize(
+        return gwo_maximize(
             fitness,
             bounds,
-            max_iter=max(args.iters, 8),
+            n_wolves=args.wolves,
+            n_iter=args.iters,
+            seed=seed,
         )
 
     best_baseline, fit_baseline, hist_baseline = optimize(
@@ -465,7 +451,7 @@ def main() -> None:
         if alpha_matrix is not None:
             print(f"  Alpha block matrix ({alpha_matrix.shape[0]}x{alpha_matrix.shape[1]}):")
             print(_alpha_matrix_text(alpha_matrix))
-        print(f"  PSNR: {r.psnr-14:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
+        print(f"  PSNR: {r.psnr:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
         print("  NC under attacks:")
         for k, v in r.nc_by_attack.items():
             print(f"    {k:12s} {v:.4f}")
@@ -482,25 +468,25 @@ def main() -> None:
         "watermark_shape": list(watermark.shape),
         "modified_features": {
             "adaptive_alpha": True,
-            "alpha_block_formula": "alpha_block = optimized_alpha * variance(block) / mean_variance(all_blocks)",
+            "alpha_block_formula": "alpha_block = optimized_alpha * variance(coarse_LL3_region) / mean_variance(all_coarse_LL3_regions)",
             "aes_then_henon": True,
             "blind_extraction": True,
         },
         "baseline": {
-            "optimizer": args.optimizer,
+            "optimizer": "gwo",
             "adaptive_alpha": False,
             "aes_then_henon": False,
             "blind_extraction": False,
             "alpha": rep_baseline.alpha,
             "fitness": rep_baseline.fitness,
-            "psnr": rep_baseline.psnr-14,
+            "psnr": rep_baseline.psnr,
             "ssim": rep_baseline.ssim,
             "nc_clean": rep_baseline.nc_clean,
             "mean_nc_attacks": rep_baseline.mean_nc_attacks,
             "nc_by_attack": rep_baseline.nc_by_attack,
         },
         "modified": {
-            "optimizer": args.optimizer,
+            "optimizer": "gwo",
             "adaptive_alpha": True,
             "aes_then_henon": True,
             "blind_extraction": True,
@@ -508,7 +494,7 @@ def main() -> None:
             "alpha_block_matrix_shape": list(modified_alpha_matrix.shape),
             "alpha_block_matrix": modified_alpha_matrix.tolist(),
             "fitness": rep_modified.fitness,
-            "psnr": rep_modified.psnr-14,
+            "psnr": rep_modified.psnr,
             "ssim": rep_modified.ssim,
             "nc_clean": rep_modified.nc_clean,
             "mean_nc_attacks": rep_modified.mean_nc_attacks,
