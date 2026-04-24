@@ -9,7 +9,7 @@ Baseline:
     - scalar alpha search
 
 Modified:
-    - adaptive block-wise alpha
+    - adaptive per-block alpha matrix
     - AES encryption followed by Henon scrambling
     - semi-blind extraction using stored host-side singular values
     - scalar alpha search
@@ -54,7 +54,6 @@ def _display_pipeline(
     aes_nonce: bytes,
     title_prefix: str = "",
     wm_preview: np.ndarray | None = None,
-    alpha_gain_range: tuple[float, float] = (0.7, 1.3),
     prepared_baseline: PreparedEmbedding | None = None,
     prepared_modified: PreparedEmbedding | None = None,
 ) -> None:
@@ -67,7 +66,6 @@ def _display_pipeline(
             watermark,
             henon_key,
             nlevels=nlevels,
-            adaptive_alpha=False,
             blind=False,
             use_aes=False,
         )
@@ -81,7 +79,6 @@ def _display_pipeline(
             henon_key,
             nlevels=nlevels,
             adaptive_alpha=True,
-            alpha_gain_range=alpha_gain_range,
             use_aes=True,
             aes_key=aes_key,
             aes_nonce=aes_nonce,
@@ -166,6 +163,15 @@ def _load_image(path: str | None) -> np.ndarray:
     return im
 
 
+def _alpha_matrix_text(alpha_blocks: np.ndarray) -> str:
+    return np.array2string(
+        np.asarray(alpha_blocks, dtype=np.float64),
+        precision=5,
+        suppress_small=False,
+        max_line_width=120,
+    )
+
+
 def _save_image01(path: Path, image: np.ndarray) -> None:
     import cv2
 
@@ -237,7 +243,7 @@ def _save_attack_outputs(
         "Attack output images",
         "",
         "baseline/: host-dependent reference extraction outputs",
-        "modified/: adaptive AES+Henon semi-blind extraction outputs",
+        "modified/: AES+Henon semi-blind extraction outputs",
         "",
         "For each method:",
         "- watermarked.png",
@@ -275,8 +281,6 @@ def main() -> None:
         help="Alpha optimizer. '..' is much faster for this 1-D search; use 'pso' for the original PSO run.",
     )
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--alpha-gain-low", type=float, default=0.7, help="Lower adaptive gain for smooth blocks")
-    ap.add_argument("--alpha-gain-high", type=float, default=1.3, help="Upper adaptive gain for textured blocks")
     ap.add_argument(
         "--aes-secret",
         type=str,
@@ -334,14 +338,12 @@ def main() -> None:
         args.alpha_low if args.modified_alpha_low is None else args.modified_alpha_low,
         args.alpha_high if args.modified_alpha_high is None else args.modified_alpha_high,
     )
-    alpha_gain_range = (args.alpha_gain_low, args.alpha_gain_high)
     attack_names = ["jpeg", "noise", "rotation", "scaling", "translation"]
     prepared_baseline = prepare_embedding(
         host,
         watermark,
         henon_key,
         nlevels=meta.nlevels,
-        adaptive_alpha=False,
         use_aes=False,
         blind=False,
     )
@@ -351,7 +353,6 @@ def main() -> None:
         henon_key,
         nlevels=meta.nlevels,
         adaptive_alpha=True,
-        alpha_gain_range=alpha_gain_range,
         use_aes=True,
         aes_key=aes_key,
         aes_nonce=aes_nonce,
@@ -364,7 +365,6 @@ def main() -> None:
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
-        adaptive_alpha=False,
         use_aes=False,
         blind=False,
         prepared=prepared_baseline,
@@ -376,7 +376,6 @@ def main() -> None:
         attack_names=attack_names,
         nlevels=meta.nlevels,
         adaptive_alpha=True,
-        alpha_gain_range=alpha_gain_range,
         use_aes=True,
         aes_key=aes_key,
         aes_nonce=aes_nonce,
@@ -388,8 +387,8 @@ def main() -> None:
     print("DTCWT levels:", meta.nlevels, "| LL3 block grid:", grid_shape, "| binary payload capacity:", cap, "bits")
     print("Logo payload shape:", watermark.shape)
     print("Modified approach: adaptive alpha + AES + Henon + semi-blind extraction")
-    print("Adaptive alpha range:", alpha_gain_range)
-    print("Alpha optimizer:", "PSO")
+    print("Adaptive alpha formula: alpha_block = optimized_alpha * variance(coarse LL3 region) / mean_variance(all coarse regions)")
+    print("Alpha optimizer:", args.optimizer.upper())
 
     def optimize(title: str, fitness, bounds: tuple[float, float], seed: int):
         # print(f"Optimizing {title} with {args.optimizer.upper()} ...")
@@ -428,7 +427,6 @@ def main() -> None:
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
-        adaptive_alpha=False,
         use_aes=False,
         blind=False,
         prepared=prepared_baseline,
@@ -441,20 +439,29 @@ def main() -> None:
         attack_names=attack_names,
         nlevels=meta.nlevels,
         adaptive_alpha=True,
-        alpha_gain_range=alpha_gain_range,
         use_aes=True,
         aes_key=aes_key,
         aes_nonce=aes_nonce,
         blind=True,
         prepared=prepared_modified,
     )
+    _, modified_state = embed_prepared(prepared_modified, best_modified)
+    modified_alpha_matrix = modified_state.alpha_blocks[: grid_shape[0], : grid_shape[1]]
 
-    def block(title: str, r, *, adaptive_alpha: bool, use_aes: bool, blind: bool) -> None:
+    def block(
+        title: str,
+        r,
+        *,
+        adaptive_alpha: bool,
+        use_aes: bool,
+        blind: bool,
+        alpha_matrix: np.ndarray | None = None,
+    ) -> None:
         print(f"\n=== {title} (alpha={r.alpha:.5f}, fitness={r.fitness:.4f}) ===")
         print(f"  Adaptive alpha: {adaptive_alpha}   AES+Henon: {use_aes}   Blind extraction: {blind}")
-        if adaptive_alpha:
-            lo, hi = alpha_gain_range
-            print(f"  Displayed alpha is the optimized base alpha; block gains use range {lo:.2f}-{hi:.2f}")
+        if alpha_matrix is not None:
+            print(f"  Alpha block matrix ({alpha_matrix.shape[0]}x{alpha_matrix.shape[1]}):")
+            print(_alpha_matrix_text(alpha_matrix))
         print(f"  PSNR: {r.psnr-14:.2f} dB   SSIM: {r.ssim:.4f}   NC (no attack): {r.nc_clean:.4f}")
         print("  NC under attacks:")
         for k, v in r.nc_by_attack.items():
@@ -462,7 +469,7 @@ def main() -> None:
         print(f"  Mean NC (attacks): {r.mean_nc_attacks:.4f}")
 
     block("Baseline", rep_baseline, adaptive_alpha=False, use_aes=False, blind=False)
-    block("Modified", rep_modified, adaptive_alpha=True, use_aes=True, blind=True)
+    block("Modified", rep_modified, adaptive_alpha=True, use_aes=True, blind=True, alpha_matrix=modified_alpha_matrix)
 
     summary = {
         "host_shape": list(host.shape),
@@ -472,13 +479,12 @@ def main() -> None:
         "watermark_shape": list(watermark.shape),
         "modified_features": {
             "adaptive_alpha": True,
-            "alpha_gain_range": list(alpha_gain_range),
+            "alpha_block_formula": "alpha_block = optimized_alpha * variance(coarse_LL3_region) / mean_variance(all_coarse_LL3_regions)",
             "aes_then_henon": True,
             "blind_extraction": True,
         },
         "baseline": {
             "optimizer": args.optimizer,
-            "adaptive_alpha": False,
             "aes_then_henon": False,
             "blind_extraction": False,
             "alpha": rep_baseline.alpha,
@@ -495,6 +501,8 @@ def main() -> None:
             "aes_then_henon": True,
             "blind_extraction": True,
             "alpha": rep_modified.alpha,
+            "alpha_block_matrix_shape": list(modified_alpha_matrix.shape),
+            "alpha_block_matrix": modified_alpha_matrix.tolist(),
             "fitness": rep_modified.fitness,
             "psnr": rep_modified.psnr-14,
             "ssim": rep_modified.ssim,
@@ -532,7 +540,6 @@ def main() -> None:
             aes_key,
             aes_nonce,
             wm_preview=wm_preview,
-            alpha_gain_range=alpha_gain_range,
             prepared_baseline=prepared_baseline,
             prepared_modified=prepared_modified,
         )

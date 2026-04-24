@@ -23,6 +23,7 @@ class WatermarkState:
     payload_len: int
     alpha: float
     alpha_blocks: np.ndarray
+    alpha_lookup_blocks: np.ndarray
     adaptive_alpha: bool
     blind: bool
     use_aes: bool
@@ -53,6 +54,7 @@ class PreparedEmbedding:
     pyramid: Pyramid
     lowpass: np.ndarray
     alpha_unit_blocks: np.ndarray
+    alpha_unit_lookup_blocks: np.ndarray
     block_positions: tuple[tuple[int, int, int, int], ...]
     host_u: tuple[np.ndarray, ...]
     host_s: tuple[np.ndarray, ...]
@@ -83,35 +85,30 @@ def _alpha_block_map(
     grid_shape: tuple[int, int],
     alpha: float,
     adaptive_alpha: bool,
-    gain_range: tuple[float, float],
-) -> np.ndarray:
+) -> tuple[np.ndarray, np.ndarray]:
     """Return per-block embedding strengths for 8x8 LL blocks."""
     base = float(alpha)
     gh, gw = grid_shape
     if not adaptive_alpha:
-        return np.full((gh, gw), base, dtype=np.float64)
+        full = np.full((gh, gw), base, dtype=np.float64)
+        return full, full
 
-    var_map = np.empty((gh, gw), dtype=np.float64)
-    for i in range(gh):
-        for j in range(gw):
-            r, c = i * 8, j * 8
-            block = lowpass[r : r + 8, c : c + 8]
+    alpha_grid_shape = (max(1, (gh + 1) // 2), max(1, (gw + 1) // 2))
+    var_map = np.empty(alpha_grid_shape, dtype=np.float64)
+    for i in range(alpha_grid_shape[0]):
+        for j in range(alpha_grid_shape[1]):
+            r, c = i * 16, j * 16
+            block = lowpass[r : r + 16, c : c + 16]
             var_map[i, j] = float(np.var(block))
 
-    lo, hi = gain_range
-    if hi <= lo:
-        raise ValueError(f"Invalid adaptive alpha gain range {gain_range}")
-
-    vmin = float(var_map.min())
-    vmax = float(var_map.max())
-    if vmax - vmin < 1e-12:
-        gains = np.ones_like(var_map)
+    mean_var = float(np.mean(var_map))
+    if mean_var < 1e-12:
+        per_block_scale = np.ones_like(var_map)
     else:
-        norm = (var_map - vmin) / (vmax - vmin)
-        gains = lo + (hi - lo) * norm
-        gains /= max(float(np.mean(gains)), 1e-12)
-        gains = np.clip(gains, lo, hi)
-    return base * gains
+        per_block_scale = var_map / mean_var
+    alpha_blocks = base * per_block_scale
+    alpha_lookup_blocks = np.repeat(np.repeat(alpha_blocks, 2, axis=0), 2, axis=1)[:gh, :gw]
+    return alpha_blocks, alpha_lookup_blocks
 
 
 def _henon_encrypt_image(image: np.ndarray, key: tuple[float, float, float, float]) -> tuple[np.ndarray, np.ndarray]:
@@ -253,7 +250,6 @@ def prepare_embedding(
     henon_key: tuple[float, float, float, float],
     nlevels: int = 3,
     adaptive_alpha: bool = False,
-    alpha_gain_range: tuple[float, float] = (0.7, 1.3),
     use_aes: bool = False,
     aes_key: bytes | None = None,
     aes_nonce: bytes | None = None,
@@ -282,7 +278,7 @@ def prepare_embedding(
         aes_key=aes_key,
         aes_nonce=aes_nonce,
     )
-    alpha_unit_blocks = _alpha_block_map(low, grid_shape, 1.0, adaptive_alpha, alpha_gain_range)
+    alpha_unit_blocks, alpha_unit_lookup_blocks = _alpha_block_map(low, grid_shape, 1.0, adaptive_alpha)
 
     block_positions: list[tuple[int, int, int, int]] = []
     host_u: list[np.ndarray] = []
@@ -328,6 +324,7 @@ def prepare_embedding(
         pyramid=p,
         lowpass=low,
         alpha_unit_blocks=alpha_unit_blocks,
+        alpha_unit_lookup_blocks=alpha_unit_lookup_blocks,
         block_positions=tuple(block_positions),
         host_u=tuple(host_u),
         host_s=tuple(host_s),
@@ -341,12 +338,14 @@ def prepare_embedding(
 def embed_prepared(prepared: PreparedEmbedding, alpha: float) -> tuple[np.ndarray, WatermarkState]:
     """Embed using reusable data from :func:`prepare_embedding`."""
     out_low = prepared.lowpass.copy()
-    alpha_blocks = prepared.alpha_unit_blocks * float(alpha)
+    alpha = float(alpha)
+    alpha_blocks = prepared.alpha_unit_blocks * alpha
+    alpha_lookup_blocks = prepared.alpha_unit_lookup_blocks * alpha
 
     for block_idx, (r, c, _br, _bc) in enumerate(prepared.block_positions):
         h_s_mod = prepared.host_s[block_idx].copy()
         w_s = prepared.wm_s[block_idx]
-        alpha_block = float(alpha_blocks[r // 8, c // 8])
+        alpha_block = float(alpha_lookup_blocks[r // 8, c // 8])
         h_s_mod[: w_s.size] = h_s_mod[: w_s.size] + alpha_block * w_s
         out_low[r : r + 8, c : c + 8] = idct2(
             prepared.host_u[block_idx] @ np.diag(h_s_mod) @ prepared.host_vt[block_idx]
@@ -363,8 +362,9 @@ def embed_prepared(prepared: PreparedEmbedding, alpha: float) -> tuple[np.ndarra
         grid_shape=prepared.grid_shape,
         payload_shape=prepared.payload_shape,
         payload_len=prepared.payload_len,
-        alpha=float(alpha),
+        alpha=alpha,
         alpha_blocks=alpha_blocks,
+        alpha_lookup_blocks=alpha_lookup_blocks,
         adaptive_alpha=prepared.adaptive_alpha,
         blind=prepared.blind,
         use_aes=prepared.use_aes,
@@ -386,7 +386,6 @@ def embed(
     henon_key: tuple[float, float, float, float],
     nlevels: int = 3,
     adaptive_alpha: bool = False,
-    alpha_gain_range: tuple[float, float] = (0.7, 1.3),
     use_aes: bool = False,
     aes_key: bytes | None = None,
     aes_nonce: bytes | None = None,
@@ -402,7 +401,6 @@ def embed(
         henon_key,
         nlevels=nlevels,
         adaptive_alpha=adaptive_alpha,
-        alpha_gain_range=alpha_gain_range,
         use_aes=use_aes,
         aes_key=aes_key,
         aes_nonce=aes_nonce,
@@ -436,7 +434,7 @@ def extract(
         d1 = dct2(low1[r : r + 8, c : c + 8])
         s0 = state.host_s[block_idx]
         _, s1, _ = np.linalg.svd(d1, full_matrices=False)
-        alpha_block = float(state.alpha_blocks[r // 8, c // 8])
+        alpha_block = float(state.alpha_lookup_blocks[r // 8, c // 8])
         sw = np.maximum((s1 - s0) / max(alpha_block, 1e-12), 0.0)
         w_block = state.wm_u[block_idx] @ np.diag(sw) @ state.wm_vt[block_idx]
         enc_out[br : br + 8, bc : bc + 8] = np.clip(w_block, 0.0, 1.0)
