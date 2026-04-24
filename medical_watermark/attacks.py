@@ -59,7 +59,7 @@ def correct_attack_for_extraction(name: str, img: np.ndarray) -> np.ndarray:
     but rotation/translation are realigned before extracting the watermark.
     """
     if name == "rotation":
-        return attack_rotation(img, -5.0)
+        return attack_rotation(img, -20.0)
     if name == "translation":
         return np.clip(shift(img, (-2, -4), order=1, mode="constant", cval=0.5), 0.0, 1.0)
     return img
@@ -69,7 +69,7 @@ def correction_candidates_for_extraction(name: str, img: np.ndarray) -> list[np.
     """Return synchronization candidates for extraction from a known attack type."""
     if name == "rotation":
         candidates: list[np.ndarray] = []
-        for degrees in (-6.0, -5.5, -5.0, -4.5, -4.0):
+        for degrees in (-21.0, -20.5, -20.0, -19.5, -19.0):
             rot = attack_rotation(img, degrees)
             candidates.append(rot)
             for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
@@ -88,7 +88,7 @@ def make_attack_registry(noise_rng: np.random.Generator | None = None) -> dict[s
     return {
         "jpeg": lambda im: attack_jpeg(im, 70),
         "noise": lambda im: attack_gaussian_noise(im, 0.02, rng=noise_rng or np.random.default_rng(0)),
-        "rotation": lambda im: attack_rotation(im, 5.0),
+        "rotation": lambda im: attack_rotation(im, 20.0),
         "scaling": lambda im: attack_scaling(im, 0.95),
         "translation": lambda im: attack_translation(im, 4, 2),
     }

@@ -16,7 +16,6 @@ Modified:
 """
 
 from __future__ import annotations
-
 import argparse
 import json
 import sys
@@ -27,7 +26,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import numpy as np
-
 from medical_watermark.attacks import correction_candidates_for_extraction, make_attack_registry
 from medical_watermark.crypto import derive_aes_key
 from medical_watermark.fitness import evaluate_alpha, make_fitness_fn
@@ -66,6 +64,7 @@ def _display_pipeline(
             watermark,
             henon_key,
             nlevels=nlevels,
+            adaptive_alpha=False,
             blind=False,
             use_aes=False,
         )
@@ -243,7 +242,7 @@ def _save_attack_outputs(
         "Attack output images",
         "",
         "baseline/: host-dependent reference extraction outputs",
-        "modified/: AES+Henon semi-blind extraction outputs",
+        "modified/: adaptive AES+Henon semi-blind extraction outputs",
         "",
         "For each method:",
         "- watermarked.png",
@@ -344,6 +343,7 @@ def main() -> None:
         watermark,
         henon_key,
         nlevels=meta.nlevels,
+        adaptive_alpha=False,
         use_aes=False,
         blind=False,
     )
@@ -365,6 +365,7 @@ def main() -> None:
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
+        adaptive_alpha=False,
         use_aes=False,
         blind=False,
         prepared=prepared_baseline,
@@ -387,7 +388,7 @@ def main() -> None:
     print("DTCWT levels:", meta.nlevels, "| LL3 block grid:", grid_shape, "| binary payload capacity:", cap, "bits")
     print("Logo payload shape:", watermark.shape)
     print("Modified approach: adaptive alpha + AES + Henon + semi-blind extraction")
-    print("Adaptive alpha formula: alpha_block = optimized_alpha * variance(coarse LL3 region) / mean_variance(all coarse regions)")
+    print("Adaptive alpha: per-block variance matrix normalized by mean block variance")
     print("Alpha optimizer:", args.optimizer.upper())
 
     def optimize(title: str, fitness, bounds: tuple[float, float], seed: int):
@@ -427,6 +428,7 @@ def main() -> None:
         henon_key,
         attack_names=attack_names,
         nlevels=meta.nlevels,
+        adaptive_alpha=False,
         use_aes=False,
         blind=False,
         prepared=prepared_baseline,
@@ -445,6 +447,7 @@ def main() -> None:
         blind=True,
         prepared=prepared_modified,
     )
+
     _, modified_state = embed_prepared(prepared_modified, best_modified)
     modified_alpha_matrix = modified_state.alpha_blocks[: grid_shape[0], : grid_shape[1]]
 
@@ -479,12 +482,13 @@ def main() -> None:
         "watermark_shape": list(watermark.shape),
         "modified_features": {
             "adaptive_alpha": True,
-            "alpha_block_formula": "alpha_block = optimized_alpha * variance(coarse_LL3_region) / mean_variance(all_coarse_LL3_regions)",
+            "alpha_block_formula": "alpha_block = optimized_alpha * variance(block) / mean_variance(all_blocks)",
             "aes_then_henon": True,
             "blind_extraction": True,
         },
         "baseline": {
             "optimizer": args.optimizer,
+            "adaptive_alpha": False,
             "aes_then_henon": False,
             "blind_extraction": False,
             "alpha": rep_baseline.alpha,
