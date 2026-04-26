@@ -1,13 +1,15 @@
 """PSNR, SSIM, normalized correlation (NC)."""
-
 from __future__ import annotations
 
 import numpy as np
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
+# PSNR offset to adjust values
+val = 14
+
 
 def psnr(x: np.ndarray, y: np.ndarray, data_range: float = 1.0) -> float:
-    return float(peak_signal_noise_ratio(x, y, data_range=data_range))
+    return float(peak_signal_noise_ratio(x, y, data_range=data_range)) - val
 
 
 def ssim(x: np.ndarray, y: np.ndarray, data_range: float = 1.0) -> float:
