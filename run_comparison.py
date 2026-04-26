@@ -322,24 +322,24 @@ def main() -> None:
     henon_key = (0.1 + 0.01 * args.seed, 0.2, 1.4, 0.3)
     aes_key = derive_aes_key(args.aes_secret)
     aes_nonce = bytes(np.random.default_rng(args.seed + 123).integers(0, 256, size=8, dtype=np.uint8).tolist())
-    baseline_bounds = (
-        args.alpha_low if args.baseline_alpha_low is None else args.baseline_alpha_low,
-        args.alpha_high if args.baseline_alpha_high is None else args.baseline_alpha_high,
-    )
+    # baseline_bounds = (
+    #     args.alpha_low if args.baseline_alpha_low is None else args.baseline_alpha_low,
+    #     args.alpha_high if args.baseline_alpha_high is None else args.baseline_alpha_high,
+    # )
     modified_bounds = (
         args.alpha_low if args.modified_alpha_low is None else args.modified_alpha_low,
         args.alpha_high if args.modified_alpha_high is None else args.modified_alpha_high,
     )
     attack_names = ["jpeg", "noise", "rotation", "scaling", "translation"]
-    prepared_baseline = prepare_embedding(
-        host,
-        watermark,
-        henon_key,
-        nlevels=meta.nlevels,
-        adaptive_alpha=False,
-        use_aes=False,
-        blind=False,
-    )
+    # prepared_baseline = prepare_embedding(
+    #     host,
+    #     watermark,
+    #     henon_key,
+    #     nlevels=meta.nlevels,
+    #     adaptive_alpha=False,
+    #     use_aes=False,
+    #     blind=False,
+    # )
     prepared_modified = prepare_embedding(
         host,
         watermark,
@@ -352,17 +352,17 @@ def main() -> None:
         blind=True,
     )
 
-    fitness_baseline = make_fitness_fn(
-        host,
-        watermark,
-        henon_key,
-        attack_names=attack_names,
-        nlevels=meta.nlevels,
-        adaptive_alpha=False,
-        use_aes=False,
-        blind=False,
-        prepared=prepared_baseline,
-    )
+    # fitness_baseline = make_fitness_fn(
+    #     host,
+    #     watermark,
+    #     henon_key,
+    #     attack_names=attack_names,
+    #     nlevels=meta.nlevels,
+    #     adaptive_alpha=False,
+    #     use_aes=False,
+    #     blind=False,
+    #     prepared=prepared_baseline,
+    # )
     fitness_modified = make_fitness_fn(
         host,
         watermark,
@@ -384,8 +384,9 @@ def main() -> None:
     print("Adaptive alpha formula: alpha_block = optimized_alpha * variance(coarse LL3 region) / mean_variance(all coarse regions)")
     print("Alpha optimizer: GWO")
 
-    def optimize(title: str, fitness, bounds: tuple[float, float], seed: int):
-        print(f"Optimizing {title}")
+    def optimize(title: str, fitness, bounds: tuple[float, float], seed: int, *, announce: bool = True):
+        if announce:
+            print(f"Optimizing {title}")
         return gwo_maximize(
             fitness,
             bounds,
@@ -394,12 +395,13 @@ def main() -> None:
             seed=seed,
         )
 
-    best_baseline, fit_baseline, hist_baseline = optimize(
-        "baseline",
-        fitness_baseline,
-        baseline_bounds,
-        args.seed,
-    )
+    # best_baseline, fit_baseline, hist_baseline = optimize(
+    #     "baseline",
+    #     fitness_baseline,
+    #     baseline_bounds,
+    #     args.seed,
+    #     announce=False,
+    # )
     best_modified, fit_modified, hist_modified = optimize(
         "modified approach",
         fitness_modified,
@@ -407,18 +409,18 @@ def main() -> None:
         args.seed + 17,
     )
 
-    rep_baseline = evaluate_alpha(
-        host,
-        watermark,
-        best_baseline,
-        henon_key,
-        attack_names=attack_names,
-        nlevels=meta.nlevels,
-        adaptive_alpha=False,
-        use_aes=False,
-        blind=False,
-        prepared=prepared_baseline,
-    )
+    # rep_baseline = evaluate_alpha(
+    #     host,
+    #     watermark,
+    #     best_baseline,
+    #     henon_key,
+    #     attack_names=attack_names,
+    #     nlevels=meta.nlevels,
+    #     adaptive_alpha=False,
+    #     use_aes=False,
+    #     blind=False,
+    #     prepared=prepared_baseline,
+    # )
     rep_modified = evaluate_alpha(
         host,
         watermark,
@@ -457,7 +459,6 @@ def main() -> None:
             print(f"    {k:12s} {v:.4f}")
         print(f"  Mean NC (attacks): {r.mean_nc_attacks:.4f}")
 
-    block("Baseline", rep_baseline, adaptive_alpha=False, use_aes=False, blind=False)
     block("Modified", rep_modified, adaptive_alpha=True, use_aes=True, blind=True, alpha_matrix=modified_alpha_matrix)
 
     summary = {
@@ -472,19 +473,19 @@ def main() -> None:
             "aes_then_henon": True,
             "blind_extraction": True,
         },
-        "baseline": {
-            "optimizer": "gwo",
-            "adaptive_alpha": False,
-            "aes_then_henon": False,
-            "blind_extraction": False,
-            "alpha": rep_baseline.alpha,
-            "fitness": rep_baseline.fitness,
-            "psnr": rep_baseline.psnr,
-            "ssim": rep_baseline.ssim,
-            "nc_clean": rep_baseline.nc_clean,
-            "mean_nc_attacks": rep_baseline.mean_nc_attacks,
-            "nc_by_attack": rep_baseline.nc_by_attack,
-        },
+        # "baseline": {
+        #     "optimizer": "gwo",
+        #     "adaptive_alpha": False,
+        #     "aes_then_henon": False,
+        #     "blind_extraction": False,
+        #     "alpha": rep_baseline.alpha,
+        #     "fitness": rep_baseline.fitness,
+        #     "psnr": rep_baseline.psnr,
+        #     "ssim": rep_baseline.ssim,
+        #     "nc_clean": rep_baseline.nc_clean,
+        #     "mean_nc_attacks": rep_baseline.mean_nc_attacks,
+        #     "nc_by_attack": rep_baseline.nc_by_attack,
+        # },
         "modified": {
             "optimizer": "gwo",
             "adaptive_alpha": True,
@@ -506,33 +507,34 @@ def main() -> None:
         print(f"\nWrote {args.out_json}")
 
     if args.save_attacks_dir:
-        _save_attack_outputs(
-            Path(args.save_attacks_dir),
-            host,
-            watermark,
-            best_baseline,
-            best_modified,
-            prepared_baseline,
-            prepared_modified,
-            attack_names,
-            aes_key,
-        )
-        print(f"\nWrote attack images to {args.save_attacks_dir}")
+        # _save_attack_outputs(
+        #     Path(args.save_attacks_dir),
+        #     host,
+        #     watermark,
+        #     best_baseline,
+        #     best_modified,
+        #     prepared_baseline,
+        #     prepared_modified,
+        #     attack_names,
+        #     aes_key,
+        # )
+        print("\nSkipping attack-image export in modified-only mode because the current helper compares baseline and modified outputs.")
 
     if args.display:
-        _display_pipeline(
-            host,
-            watermark,
-            best_baseline,
-            best_modified,
-            henon_key,
-            meta.nlevels,
-            aes_key,
-            aes_nonce,
-            wm_preview=wm_preview,
-            prepared_baseline=prepared_baseline,
-            prepared_modified=prepared_modified,
-        )
+        # _display_pipeline(
+        #     host,
+        #     watermark,
+        #     best_baseline,
+        #     best_modified,
+        #     henon_key,
+        #     meta.nlevels,
+        #     aes_key,
+        #     aes_nonce,
+        #     wm_preview=wm_preview,
+        #     prepared_baseline=prepared_baseline,
+        #     prepared_modified=prepared_modified,
+        # )
+        print("\nSkipping side-by-side display in modified-only mode because the current viewer compares baseline and modified pipelines.")
 
 
 if __name__ == "__main__":
